@@ -1,0 +1,39 @@
+name: Arduino Compile
+
+# Ejecutar cuando se crea o actualiza
+# un Pull Request hacia main
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  compile:
+    name: Compile Arduino Uno
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # Descargar el repositorio
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Compilar los programas Arduino
+      - name: Compile Arduino sketches
+        uses: arduino/compile-sketches@v1
+        with:
+
+          # Placa utilizada en el proyecto
+          fqbn: arduino:avr:uno
+
+          # Programas que deben compilar correctamente
+          sketch-paths: |
+            - base
+            - diagnostics
+
+          # Librerías utilizadas por el proyecto
+          libraries: |
+            - name: MFRC522
+            - name: Keypad
+            - name: LiquidCrystal I2C
+            - name: Servo
