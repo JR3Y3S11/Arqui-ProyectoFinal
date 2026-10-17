@@ -162,6 +162,16 @@ byte posicionPIN = 0;
 
 byte intentosFallidos = 0;
 
+// Usuarios en EEPROM: [UID 4 bytes][PIN 4 caracteres] x NUM_USUARIOS
+const byte NUM_USUARIOS = 2;
+const byte DIR_MAGIC = 0;        // marca para saber si la EEPROM ya fue inicializada
+const byte VALOR_MAGIC = 0x42;
+const byte DIR_USUARIOS = 1;
+const byte TAM_REGISTRO = 8;
+
+// Usuario cuya tarjeta fue reconocida (-1 = ninguno); lo usará validarPIN()
+int usuarioActual = -1;
+
 
 // ==============================================================
 // 6. ESTADOS DEL SISTEMA
@@ -309,29 +319,60 @@ char leerTeclado()
 // ==============================================================
 // 11. LECTURA DEL RFID
 // ==============================================================
+void cargarUsuariosIniciales()
+{
+  if (EEPROM.read(DIR_MAGIC) == VALOR_MAGIC) return;   // ya estaban guardados
+
+  // CAMBIA estos UID por los de tus tarjetas (los ves en el monitor serial)
+  const byte uids[NUM_USUARIOS][4] = {
+    {0xDE, 0xAD, 0xBE, 0xEF},
+    {0x12, 0x34, 0x56, 0x78}
+  };
+  const char pins[NUM_USUARIOS][5] = { "1234", "4321" };
+
+  for (byte u = 0; u < NUM_USUARIOS; u++)
+  {
+    int base = DIR_USUARIOS + u * TAM_REGISTRO;
+    for (byte i = 0; i < 4; i++) EEPROM.update(base + i, uids[u][i]);
+    for (byte i = 0; i < 4; i++) EEPROM.update(base + 4 + i, pins[u][i]);
+  }
+  EEPROM.update(DIR_MAGIC, VALOR_MAGIC);
+}
+
+// Devuelve el UID del usuario u (leído de EEPROM) en formato "A1B2C3D4"
+String uidDeUsuario(byte u)
+{
+  String uid = "";
+  int base = DIR_USUARIOS + u * TAM_REGISTRO;
+  for (byte i = 0; i < 4; i++)
+  {
+    byte b = EEPROM.read(base + i);
+    if (b < 0x10) uid += "0";
+    uid += String(b, HEX);
+  }
+  uid.toUpperCase();
+  return uid;
+}
 
 String leerTarjeta()
 {
-  /*
-   TODO - LABORATORIO RFID
+    if (!rfid.PICC_IsNewCardPresent()) return "";
+  if (!rfid.PICC_ReadCardSerial())   return "";
 
-   Utilizar el módulo RC522.
+  String uid = "";
+  for (byte i = 0; i < rfid.uid.size; i++)
+  {
+    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+  uid.toUpperCase();
 
-   El algoritmo deberá:
+  rfid.PICC_HaltA();        // detener la tarjeta para no leerla en bucle
+  rfid.PCD_StopCrypto1();
 
-   1. Detectar si existe una nueva tarjeta.
-   2. Leer el identificador UID.
-   3. Recorrer los bytes del UID.
-   4. Convertirlos a una representación que pueda
-      utilizar el programa.
-   5. Retornar el UID.
-
-   Si no existe una tarjeta:
-
-       return "";
-  */
-
-  return "";
+  Serial.print("UID: ");
+  Serial.println(uid);
+  return uid;
 }
 
 
@@ -341,19 +382,17 @@ String leerTarjeta()
 
 bool tarjetaAutorizada(String uid)
 {
-  /*
-   TODO - LABORATORIO RFID
-
-   Determinar si el UID recibido pertenece
-   a una tarjeta autorizada.
-
-   Retornar:
-
-       true  -> tarjeta autorizada
-       false -> tarjeta no autorizada
-  */
-
+  for (byte u = 0; u < NUM_USUARIOS; u++)
+  {
+    if (uid == uidDeUsuario(u))
+    {
+      usuarioActual = u;
+      return true;
+    }
+  }
+  usuarioActual = -1;
   return false;
+
 }
 
 
@@ -519,6 +558,7 @@ void activarAlarma()
 void reiniciarSistema()
 {
   UIDLeido = "";
+  usuarioActual = -1;
 
   posicionPIN = 0;
 
@@ -626,6 +666,7 @@ void setup()
 
   delay(1500);
 
+  cargarUsuariosIniciales();
   reiniciarSistema();
 }
 
