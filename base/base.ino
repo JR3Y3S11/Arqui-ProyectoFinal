@@ -5,7 +5,8 @@
 
                  PROGRAMA BASE
  ==============================================================
-
+ Josué Reyes
+ José De la roca
  Este programa contiene la arquitectura general del proyecto.
 
  El código está INCOMPLETO intencionalmente.
