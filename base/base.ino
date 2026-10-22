@@ -174,7 +174,8 @@ char teclas[4][4] = {
 
 // UID obtenido del RC522
 
-String UIDLeido = "";
+byte uidLeido[4];
+byte uidTam = 0;
 
 
 // PIN introducido mediante el keypad
@@ -356,73 +357,69 @@ void cargarUsuariosIniciales()
 }
 
 
-// Devuelve el UID del usuario u (leído de EEPROM) en formato "A1B2C3D4"
-String uidDeUsuario(byte u)
+
+
+
+// Devuelve true si se leyó una tarjeta nueva (UID queda en uidLeido)
+bool leerTarjeta()
 {
-  String uid = "";
-  int base = DIR_USUARIOS + u * TAM_REGISTRO;
+  if (!rfid.PICC_IsNewCardPresent()) return false;
+  if (!rfid.PICC_ReadCardSerial())   return false;
+
+  uidTam = rfid.uid.size;
 
   for (byte i = 0; i < 4; i++)
   {
-    byte b = EEPROM.read(base + i);
-
-    if (b < 0x10) uid += "0";
-
-    uid += String(b, HEX);
+    uidLeido[i] = (i < uidTam) ? rfid.uid.uidByte[i] : 0;
   }
 
-  uid.toUpperCase();
-
-  return uid;
-}
-
-
-String leerTarjeta()
-{
-  if (!rfid.PICC_IsNewCardPresent()) return "";
-  if (!rfid.PICC_ReadCardSerial())   return "";
-
-  String uid = "";
-
-  for (byte i = 0; i < rfid.uid.size; i++)
+  Serial.print(F("UID: "));
+  for (byte i = 0; i < uidTam; i++)
   {
-    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
-
-    uid += String(rfid.uid.uidByte[i], HEX);
+    if (rfid.uid.uidByte[i] < 0x10) Serial.print('0');
+    Serial.print(rfid.uid.uidByte[i], HEX);
   }
-
-  uid.toUpperCase();
+  Serial.println();
 
   rfid.PICC_HaltA();        // detener la tarjeta para no leerla en bucle
   rfid.PCD_StopCrypto1();
 
-  Serial.print("UID: ");
-  Serial.println(uid);
-
-  return uid;
+  return true;
 }
-
 
 // ==============================================================
 // 12. VALIDACIÓN DE TARJETA
 // ==============================================================
 
-bool tarjetaAutorizada(String uid)
+bool tarjetaAutorizada()
 {
+  usuarioActual = -1;
+
+  if (uidTam != 4) return false;   // este sistema guarda UID de 4 bytes
+
   for (byte u = 0; u < NUM_USUARIOS; u++)
   {
-    if (uid == uidDeUsuario(u))
+    int base = DIR_USUARIOS + u * TAM_REGISTRO;
+    bool igual = true;
+
+    for (byte i = 0; i < 4; i++)
+    {
+      if (EEPROM.read(base + i) != uidLeido[i])
+      {
+        igual = false;
+        break;
+      }
+    }
+
+    if (igual)
     {
       usuarioActual = u;
       return true;
     }
   }
 
-  usuarioActual = -1;
-
   return false;
 }
-
 
 // ==============================================================
 // 13. CAPTURA DEL PIN
@@ -586,7 +583,7 @@ void activarAlarma()
 
 void reiniciarSistema()
 {
-  UIDLeido = "";
+ uidTam = 0;
 
   usuarioActual = -1;
 
@@ -733,17 +730,15 @@ void loop()
     // ESTADO 0 - ESPERANDO RFID
     // ========================================================
 
-    case ESPERANDO_RFID:
+        case ESPERANDO_RFID:
 
-      UIDLeido = leerTarjeta();
-
-      if (UIDLeido != "")
+      if (leerTarjeta())
       {
         mostrarEstadoLED(LED_VALIDANDO_RFID);
 
         delay(300);   // para que el LED 3 alcance a verse
 
-        if (tarjetaAutorizada(UIDLeido))
+        if (tarjetaAutorizada())
         {
           intentosFallidos = 0;      // nuevo proceso de autenticación
 
