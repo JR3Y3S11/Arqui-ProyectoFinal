@@ -194,7 +194,7 @@ byte intentosFallidos = 0;
 
 const byte NUM_USUARIOS = 2;
 const byte DIR_MAGIC = 0;        // marca para saber si la EEPROM ya fue inicializada
-const byte VALOR_MAGIC = 0x43;
+const byte VALOR_MAGIC = 0x44;
 const byte DIR_USUARIOS = 1;
 const byte TAM_REGISTRO = 8;
 
@@ -338,8 +338,8 @@ void cargarUsuariosIniciales()
 
   // UID reales de las tarjetas del proyecto
   const byte uids[NUM_USUARIOS][4] = {
-    {0x4E, 0x27, 0xD6, 0x06},   // tarjeta
-    {0x9D, 0x74, 0x14, 0x06}    // llavero
+    {0x8D, 0x3A, 0xDA, 0x06},   // tarjeta
+    {0x0D, 0x76, 0xBC, 0x06}    // llavero
   };
 
   const char pins[NUM_USUARIOS][5] = { "1234", "4321" };
@@ -697,7 +697,7 @@ void setup()
   delay(1500);
 
   cargarUsuariosIniciales();
-  //for (byte i = 0; i < 8; i++) { mostrarEstadoLED(1 << i); delay(300); } prueba leds
+  for (byte i = 0; i < 8; i++) { mostrarEstadoLED(1 << i); delay(300); } //prueba leds
   reiniciarSistema();
 }
 
