@@ -194,7 +194,7 @@ byte intentosFallidos = 0;
 
 const byte NUM_USUARIOS = 2;
 const byte DIR_MAGIC = 0;        // marca para saber si la EEPROM ya fue inicializada
-const byte VALOR_MAGIC = 0x42;
+const byte VALOR_MAGIC = 0x43;
 const byte DIR_USUARIOS = 1;
 const byte TAM_REGISTRO = 8;
 
@@ -245,12 +245,11 @@ void actualizarRegistro()
 {
   digitalWrite(LATCH, LOW);
 
-  // El primer byte enviado recorre toda la cadena
-  // y termina en el SEGUNDO 74HC595 (LEDs).
   shiftOut(DATA, CLOCK, MSBFIRST, registro2);
 
-  // El segundo byte queda en el PRIMER 74HC595 (teclado).
-  shiftOut(DATA, CLOCK, MSBFIRST, registro1);
+  // Con un solo 74HC595 esta línea se comenta.
+  // Al reconectar el segundo chip (teclado), se descomenta.
+  // shiftOut(DATA, CLOCK, MSBFIRST, registro1);
 
   digitalWrite(LATCH, HIGH);
 }
@@ -337,10 +336,10 @@ void cargarUsuariosIniciales()
 {
   if (EEPROM.read(DIR_MAGIC) == VALOR_MAGIC) return;   // ya estaban guardados
 
-  // CAMBIA estos UID por los de tus tarjetas (los ves en el monitor serial)
+  // UID reales de las tarjetas del proyecto
   const byte uids[NUM_USUARIOS][4] = {
-    {0xDE, 0xAD, 0xBE, 0xEF},
-    {0x12, 0x34, 0x56, 0x78}
+    {0x4E, 0x27, 0xD6, 0x06},   // tarjeta
+    {0x9D, 0x74, 0x14, 0x06}    // llavero
   };
 
   const char pins[NUM_USUARIOS][5] = { "1234", "4321" };
@@ -698,7 +697,7 @@ void setup()
   delay(1500);
 
   cargarUsuariosIniciales();
-
+  //for (byte i = 0; i < 8; i++) { mostrarEstadoLED(1 << i); delay(300); } prueba leds
   reiniciarSistema();
 }
 
