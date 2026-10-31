@@ -1,26 +1,33 @@
 /*
  ==============================================================
-             ARQUITECTURA DEL COMPUTADOR
-        PROYECTO: SISTEMA DE CONTROL DE ACCESO
-
-                 PROGRAMA BASE
+        SISTEMA DE CONTROL DE ACCESO - VERSIÓN DE PRUEBA
  ==============================================================
- Josué Reyes
- José De la roca
- Este programa contiene la arquitectura general del proyecto.
+ Hardware que se usa en esta versión:
+   LCD I2C, un 74HC595 (LEDs), RC522, servo, buzzer activo, botón
 
- El código está INCOMPLETO intencionalmente.
+ Sin teclado matricial: las teclas se escriben en el Monitor
+ Serial (9600). Ejemplo: "1234#" escribe el PIN y lo confirma.
 
- Durante los siguientes laboratorios se implementarán
- progresivamente las funciones marcadas como:
+   0-9 -> dígitos del PIN
+   *   -> borrar último dígito
+   #   -> confirmar PIN
+   C   -> cerrar la puerta
+   D   -> apagar la alarma
 
-                         TODO
+ Sonidos:
+   Tarjeta válida   -> 1 pip
+   Tarjeta inválida -> 2 pips
+   PIN correcto     -> 1 pip
+   PIN incorrecto   -> 2 pips
 
- Al finalizar los laboratorios, este programa se habrá
- convertido en el sistema completo de control de acceso.
+ Cuando estén armados el teclado y el segundo 595:
+   USAR_TECLADO 1  y  DOS_595 1
  ==============================================================
 */
 
+#define USAR_TECLADO 0   // 0 = teclas por Monitor Serial, 1 = teclado matricial
+#define DOS_595      0   // 0 = un solo 595 (LEDs), 1 = dos 595 en cadena
+#define AUTOTEST     1   // 1 = al arrancar prueba LEDs, buzzer y servo
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -31,42 +38,23 @@
 
 
 // ==============================================================
-// 1. MAPA DE PINES
+// 1. PINES
 // ==============================================================
-
 /*
- ARDUINO UNO
- --------------------------------------------------------------
-
- D0  -> Serial RX
- D1  -> Serial TX
-
- D2  -> Buzzer
- D3  -> Botón de diagnóstico
+ D2  -> Buzzer ACTIVO
+ D3  -> Botón (a GND, INPUT_PULLUP): mantener al encender = registrar usuarios
  D4  -> Servo
-
- D5  -> Libre
-
- D6  -> RFID RST
-
- D7  -> 74HC595 DATA   (compartido por los dos 74HC595)
- D8  -> 74HC595 CLOCK  (compartido por los dos 74HC595)
- D9  -> 74HC595 LATCH  (compartido por los dos 74HC595)
-
- D10 -> RFID SDA / SS
- D11 -> RFID MOSI
- D12 -> RFID MISO
- D13 -> RFID SCK
-
- A0  -> Keypad C1
- A1  -> Keypad C2
- A2  -> Keypad C3
- A3  -> Keypad C4
-
- A4  -> LCD SDA
- A5  -> LCD SCL
+ D6  -> RFID RST (divisor)
+ D7  -> 74HC595 DATA
+ D8  -> 74HC595 CLOCK
+ D9  -> 74HC595 LATCH
+ D10 -> RFID SS  (divisor)
+ D11 -> RFID MOSI (divisor)
+ D12 -> RFID MISO (directo)
+ D13 -> RFID SCK (divisor)
+ A0..A3 -> Keypad C1..C4 (solo si USAR_TECLADO 1)
+ A4/A5 -> LCD SDA/SCL
 */
-
 
 const byte PIN_BUZZER = 2;
 const byte PIN_DIAG   = 3;
@@ -80,61 +68,32 @@ const byte LATCH = 9;
 
 const byte RFID_SS = 10;
 
-const byte columnas[4] = {
-  A0, A1, A2, A3
-};
+const byte columnas[4] = { A0, A1, A2, A3 };
 
 
 // ==============================================================
-// 2. DISPOSITIVOS
+// 2. DISPOSITIVOS Y CONSTANTES
 // ==============================================================
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // cambiar a 0x3F si no se ve nada
 
 Servo puerta;
 
 MFRC522 rfid(RFID_SS, RFID_RST);
 
+const byte ANGULO_CERRADA = 0;
+const byte ANGULO_ABIERTA = 90;
 
-// ==============================================================
-// 3. REGISTROS DE DESPLAZAMIENTO 74HC595 (ENCADENADOS)
-// ==============================================================
-
-/*
- Dos 74HC595 en cadena: el pin Q7' (pin 9) del primero se
- conecta al pin DS (pin 14) del segundo. Ambos comparten
- CLOCK y LATCH.
-
- REGISTRO 1 (primer 74HC595) - Teclado
- ------------------------------------------------------
-       7   6   5   4   3   2   1   0
-     ┌───┬───┬───┬───┬───┬───┬───┬───┐
-     │ - │ - │ - │ - │R4 │R3 │R2 │R1 │
-     └───┴───┴───┴───┴───┴───┴───┴───┘
-
- REGISTRO 2 (segundo 74HC595) - LEDs de estado
- ------------------------------------------------------
-       7   6   5   4   3   2   1   0
-     ┌───┬───┬───┬───┬───┬───┬───┬───┐
-     │L8 │L7 │L6 │L5 │L4 │L3 │L2 │L1 │
-     └───┴───┴───┴───┴───┴───┴───┴───┘
-*/
-
-// Inicialmente las cuatro filas del teclado están HIGH.
-byte registro1 = B00001111;
-
-// Inicialmente todos los LEDs apagados.
-byte registro2 = B00000000;
+const char TECLA_CERRAR_PUERTA = 'C';
+const char TECLA_APAGAR_ALARMA = 'D';
 
 
 // ==============================================================
-// 3.1 VALORES BINARIOS DE LOS ESTADOS (LEDs)
+// 3. REGISTROS 74HC595
 // ==============================================================
 
-/*
- Cada estado del sistema se representa encendiendo
- un único LED.
-*/
+byte registro1 = B00001111;   // filas del teclado (solo con DOS_595 1)
+byte registro2 = B00000000;   // LEDs de estado
 
 const byte LED_INICIO         = B00000001;   // LED 1
 const byte LED_ESPERANDO_RFID = B00000010;   // LED 2
@@ -147,126 +106,73 @@ const byte LED_ALARMA         = B10000000;   // LED 8
 
 
 // ==============================================================
-// 4. MAPA DEL KEYPAD
+// 4. VARIABLES DEL SISTEMA
 // ==============================================================
 
-/*
- Teclas con función especial:
-
-   0-9 -> dígitos del PIN
-   *   -> borrar el último dígito
-   #   -> confirmar el PIN
-*/
-
+#if USAR_TECLADO
 char teclas[4][4] = {
-
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
   {'7', '8', '9', 'C'},
   {'*', '0', '#', 'D'}
-
 };
-
-
-// ==============================================================
-// 5. VARIABLES DEL SISTEMA
-// ==============================================================
-
-// UID obtenido del RC522
+#endif
 
 byte uidLeido[4];
 byte uidTam = 0;
 
-
-// PIN introducido mediante el keypad
-
 char pinIngresado[5] = "";
-
 byte posicionPIN = 0;
-
-
-// Número de intentos incorrectos
 
 byte intentosFallidos = 0;
 
-
-// Usuarios en EEPROM: [UID 4 bytes][PIN 4 caracteres] x NUM_USUARIOS
-
+// EEPROM: [MAGIC][UID 4 bytes][PIN 4 caracteres] x NUM_USUARIOS
 const byte NUM_USUARIOS = 2;
-const byte DIR_MAGIC = 0;        // marca para saber si la EEPROM ya fue inicializada
-const byte VALOR_MAGIC = 0x44;
+const byte DIR_MAGIC    = 0;
+const byte VALOR_MAGIC  = 0x45;
 const byte DIR_USUARIOS = 1;
 const byte TAM_REGISTRO = 8;
 
-
-// Usuario cuya tarjeta fue reconocida (-1 = ninguno)
-
 int usuarioActual = -1;
-
-
-// ==============================================================
-// 6. ESTADOS DEL SISTEMA
-// ==============================================================
-
-/*
- La CPU solamente puede encontrarse en uno de estos
- estados en un momento determinado.
-
- El estado actual determina qué operación realizará
- el programa.
-*/
 
 enum EstadoSistema
 {
   ESPERANDO_RFID,
-
   ESPERANDO_PIN,
-
   VALIDANDO_PIN,
-
   ACCESO_AUTORIZADO,
-
   ACCESO_DENEGADO,
-
   PUERTA_ABIERTA,
-
   ALARMA
 };
 
-
 EstadoSistema estado = ESPERANDO_RFID;
+
+void reiniciarSistema();   // prototipo (se usa antes de definirse)
 
 
 // ==============================================================
-// 7. ACTUALIZAR LOS DOS 74HC595
+// 5. 74HC595
 // ==============================================================
 
 void actualizarRegistro()
 {
   digitalWrite(LATCH, LOW);
 
-  shiftOut(DATA, CLOCK, MSBFIRST, registro2);
+  shiftOut(DATA, CLOCK, MSBFIRST, registro2);          // LEDs
 
-  // Con un solo 74HC595 esta línea se comenta.
-  // Al reconectar el segundo chip (teclado), se descomenta.
-  // shiftOut(DATA, CLOCK, MSBFIRST, registro1);
+#if DOS_595
+  shiftOut(DATA, CLOCK, MSBFIRST, registro1);          // teclado
+#endif
 
   digitalWrite(LATCH, HIGH);
 }
 
-
-// ==============================================================
-// 8. CONTROL DE LEDs DE ESTADO
-// ==============================================================
-
-// Envía al segundo 74HC595 el valor binario del estado actual.
 void mostrarEstadoLED(byte valor)
 {
   registro2 = valor;
-
   actualizarRegistro();
 }
-
 
 void apagarLEDs()
 {
@@ -275,31 +181,39 @@ void apagarLEDs()
 
 
 // ==============================================================
-// 9. SELECCIÓN DE FILA DEL KEYPAD
+// 6. LCD
 // ==============================================================
 
-void seleccionarFila(byte fila)
+void mostrar(const __FlashStringHelper* linea1, const __FlashStringHelper* linea2)
 {
-  // Q0-Q3 en HIGH
-  registro1 |= B00001111;
-
-  // Solo la fila seleccionada en LOW
-  bitClear(registro1, fila);
-
-  actualizarRegistro();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(linea1);
+  lcd.setCursor(0, 1);
+  lcd.print(linea2);
 }
 
 
 // ==============================================================
-// 10. LECTURA DEL KEYPAD
+// 7. TECLADO (matricial o Monitor Serial)
 // ==============================================================
+
+#if USAR_TECLADO
+void seleccionarFila(byte fila)
+{
+  registro1 |= B00001111;
+  bitClear(registro1, fila);
+  actualizarRegistro();
+}
+#endif
 
 char leerTeclado()
 {
+#if USAR_TECLADO
+
   for (byte fila = 0; fila < 4; fila++)
   {
     seleccionarFila(fila);
-
     delayMicroseconds(10);
 
     for (byte columna = 0; columna < 4; columna++)
@@ -312,11 +226,7 @@ char leerTeclado()
         {
           char tecla = teclas[fila][columna];
 
-          // Esperar a que se suelte la tecla
-          while (digitalRead(columnas[columna]) == LOW)
-          {
-            delay(5);
-          }
+          while (digitalRead(columnas[columna]) == LOW) delay(5);
 
           return tecla;
         }
@@ -325,41 +235,57 @@ char leerTeclado()
   }
 
   return 0;
-}
 
+#else
 
-// ==============================================================
-// 11. LECTURA DEL RFID
-// ==============================================================
-
-void cargarUsuariosIniciales()
-{
-  if (EEPROM.read(DIR_MAGIC) == VALOR_MAGIC) return;   // ya estaban guardados
-
-  // UID reales de las tarjetas del proyecto
-  const byte uids[NUM_USUARIOS][4] = {
-    {0x8D, 0x3A, 0xDA, 0x06},   // tarjeta
-    {0x0D, 0x76, 0xBC, 0x06}    // llavero
-  };
-
-  const char pins[NUM_USUARIOS][5] = { "1234", "4321" };
-
-  for (byte u = 0; u < NUM_USUARIOS; u++)
+  // Sin teclado: cada carácter escrito en el Monitor Serial es una tecla
+  while (Serial.available())
   {
-    int base = DIR_USUARIOS + u * TAM_REGISTRO;
+    char c = Serial.read();
 
-    for (byte i = 0; i < 4; i++) EEPROM.update(base + i, uids[u][i]);
-    for (byte i = 0; i < 4; i++) EEPROM.update(base + 4 + i, pins[u][i]);
+    if (c == '\n' || c == '\r' || c == ' ') continue;
+
+    if (c >= 'a' && c <= 'z') c = c - 32;   // minúsculas -> mayúsculas
+
+    return c;
   }
 
-  EEPROM.update(DIR_MAGIC, VALOR_MAGIC);
+  return 0;
+
+#endif
 }
 
 
+// ==============================================================
+// 8. BUZZER ACTIVO
+// ==============================================================
+
+void pitar(unsigned int ms)
+{
+  digitalWrite(PIN_BUZZER, HIGH);
+  delay(ms);
+  digitalWrite(PIN_BUZZER, LOW);
+}
+
+// Correcto: un solo pip
+void sonidoCorrecto()
+{
+  pitar(150);
+}
+
+// Error: dos pips
+void sonidoError()
+{
+  pitar(150);
+  delay(150);
+  pitar(150);
+}
 
 
+// ==============================================================
+// 9. RFID
+// ==============================================================
 
-// Devuelve true si se leyó una tarjeta nueva (UID queda en uidLeido)
 bool leerTarjeta()
 {
   if (!rfid.PICC_IsNewCardPresent()) return false;
@@ -380,37 +306,43 @@ bool leerTarjeta()
   }
   Serial.println();
 
-  rfid.PICC_HaltA();        // detener la tarjeta para no leerla en bucle
+  rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
 
   return true;
 }
 
+
 // ==============================================================
-// 12. VALIDACIÓN DE TARJETA
+// 10. EEPROM: USUARIOS
 // ==============================================================
+
+bool usuariosRegistrados()
+{
+  return EEPROM.read(DIR_MAGIC) == VALOR_MAGIC;
+}
+
+bool uidCoincide(byte slot)
+{
+  int base = DIR_USUARIOS + slot * TAM_REGISTRO;
+
+  for (byte i = 0; i < 4; i++)
+  {
+    if (EEPROM.read(base + i) != uidLeido[i]) return false;
+  }
+
+  return true;
+}
 
 bool tarjetaAutorizada()
 {
   usuarioActual = -1;
 
-  if (uidTam != 4) return false;   // este sistema guarda UID de 4 bytes
+  if (uidTam != 4) return false;
 
   for (byte u = 0; u < NUM_USUARIOS; u++)
   {
-    int base = DIR_USUARIOS + u * TAM_REGISTRO;
-    bool igual = true;
-
-    for (byte i = 0; i < 4; i++)
-    {
-      if (EEPROM.read(base + i) != uidLeido[i])
-      {
-        igual = false;
-        break;
-      }
-    }
-
-    if (igual)
+    if (uidCoincide(u))
     {
       usuarioActual = u;
       return true;
@@ -419,73 +351,6 @@ bool tarjetaAutorizada()
 
   return false;
 }
-
-// ==============================================================
-// 13. CAPTURA DEL PIN
-// ==============================================================
-
-// Línea 2 del LCD: asteriscos por cada dígito y guiones por los faltantes
-void dibujarPIN()
-{
-  lcd.setCursor(0, 1);
-
-  for (byte i = 0; i < 4; i++)
-  {
-    lcd.print(i < posicionPIN ? '*' : '_');
-  }
-}
-
-
-void mostrarPantallaPIN()
-{
-  lcd.clear();
-
-  lcd.setCursor(0, 0);
-  lcd.print("INGRESE SU PIN");
-
-  dibujarPIN();
-}
-
-
-bool leerPIN()
-{
-  char tecla = leerTeclado();
-
-  if (tecla == 0) return false;
-
-  if (tecla >= '0' && tecla <= '9')
-  {
-    if (posicionPIN < 4)
-    {
-      pinIngresado[posicionPIN] = tecla;
-      posicionPIN++;
-      pinIngresado[posicionPIN] = '\0';
-
-      dibujarPIN();
-    }
-  }
-  else if (tecla == '*')            // borrar
-  {
-    if (posicionPIN > 0)
-    {
-      posicionPIN--;
-      pinIngresado[posicionPIN] = '\0';
-
-      dibujarPIN();
-    }
-  }
-  else if (tecla == '#')            // confirmar
-  {
-    if (posicionPIN == 4) return true;
-  }
-
-  return false;
-}
-
-
-// ==============================================================
-// 14. VALIDACIÓN DEL PIN
-// ==============================================================
 
 bool validarPIN()
 {
@@ -503,102 +368,195 @@ bool validarPIN()
 
 
 // ==============================================================
-// 15. ABRIR PUERTA
+// 11. CAPTURA DEL PIN
+// ==============================================================
+
+void dibujarPIN()
+{
+  lcd.setCursor(0, 1);
+
+  for (byte i = 0; i < 4; i++)
+  {
+    lcd.print(i < posicionPIN ? '*' : '_');
+  }
+}
+
+void mostrarPantallaPIN()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("INGRESE SU PIN"));
+  dibujarPIN();
+}
+
+bool leerPIN()
+{
+  char tecla = leerTeclado();
+
+  if (tecla == 0) return false;
+
+  if (tecla >= '0' && tecla <= '9')
+  {
+    if (posicionPIN < 4)
+    {
+      pinIngresado[posicionPIN] = tecla;
+      posicionPIN++;
+      pinIngresado[posicionPIN] = '\0';
+      dibujarPIN();
+    }
+  }
+  else if (tecla == '*')
+  {
+    if (posicionPIN > 0)
+    {
+      posicionPIN--;
+      pinIngresado[posicionPIN] = '\0';
+      dibujarPIN();
+    }
+  }
+  else if (tecla == '#')
+  {
+    if (posicionPIN == 4) return true;
+  }
+
+  return false;
+}
+
+
+// ==============================================================
+// 12. REGISTRO DE USUARIOS EN EEPROM
+// ==============================================================
+
+void registrarUsuarios()
+{
+  for (byte u = 0; u < NUM_USUARIOS; u++)
+  {
+    // ---- 1. Tarjeta ----
+    bool tarjetaOk = false;
+
+    mostrarEstadoLED(LED_ESPERANDO_RFID);
+
+    while (!tarjetaOk)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("REGISTRO USER "));
+      lcd.print(u + 1);
+      lcd.setCursor(0, 1);
+      lcd.print(F("PASE TARJETA"));
+
+      while (!leerTarjeta()) { }
+
+      if (uidTam != 4)
+      {
+        mostrar(F("TARJETA NO"), F("COMPATIBLE"));
+        sonidoError();
+        delay(1200);
+        continue;
+      }
+
+      tarjetaOk = true;
+
+      for (byte s = 0; s < u; s++)
+      {
+        if (uidCoincide(s)) tarjetaOk = false;
+      }
+
+      if (!tarjetaOk)
+      {
+        mostrar(F("TARJETA YA"), F("REGISTRADA"));
+        sonidoError();
+        delay(1200);
+      }
+    }
+
+    sonidoCorrecto();   // 1 pip: tarjeta aceptada
+
+    // ---- 2. PIN ----
+    mostrarEstadoLED(LED_ESPERANDO_PIN);
+
+    posicionPIN = 0;
+    pinIngresado[0] = '\0';
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("NUEVO PIN USER "));
+    lcd.print(u + 1);
+    dibujarPIN();
+
+    while (!leerPIN()) { }
+
+    // ---- 3. Guardar ----
+    int base = DIR_USUARIOS + u * TAM_REGISTRO;
+
+    for (byte i = 0; i < 4; i++) EEPROM.update(base + i, uidLeido[i]);
+    for (byte i = 0; i < 4; i++) EEPROM.update(base + 4 + i, pinIngresado[i]);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("USUARIO "));
+    lcd.print(u + 1);
+    lcd.setCursor(0, 1);
+    lcd.print(F("GUARDADO"));
+    sonidoCorrecto();   // 1 pip: usuario guardado
+    delay(1200);
+  }
+
+  // La marca se escribe al final: si se interrumpe, se repite el registro
+  EEPROM.update(DIR_MAGIC, VALOR_MAGIC);
+
+  mostrar(F("REGISTRO"), F("COMPLETO"));
+  delay(1500);
+}
+
+
+// ==============================================================
+// 13. SERVO
 // ==============================================================
 
 void abrirPuerta()
 {
-  /*
-   TODO - LABORATORIO SERVO
-
-   Mover el servo a la posición correspondiente
-   a la puerta abierta.
-  */
+  puerta.write(ANGULO_ABIERTA);
+  delay(500);
 }
-
-
-// ==============================================================
-// 16. CERRAR PUERTA
-// ==============================================================
 
 void cerrarPuerta()
 {
-  /*
-   TODO - LABORATORIO SERVO
-
-   Mover el servo a la posición correspondiente
-   a la puerta cerrada.
-  */
+  puerta.write(ANGULO_CERRADA);
+  delay(500);
 }
 
 
 // ==============================================================
-// 17. SONIDO DE ACCESO CORRECTO
-// ==============================================================
-
-void sonidoCorrecto()
-{
-  /*
-   TODO - LABORATORIO BUZZER
-
-   Generar un sonido que indique acceso autorizado.
-  */
-}
-
-
-// ==============================================================
-// 18. SONIDO DE ERROR
-// ==============================================================
-
-void sonidoError()
-{
-  /*
-   TODO - LABORATORIO BUZZER
-
-   Generar un sonido diferente que permita
-   reconocer un acceso incorrecto.
-  */
-}
-
-
-// ==============================================================
-// 19. ALARMA
+// 14. ALARMA
 // ==============================================================
 
 void activarAlarma()
 {
-  /*
-   TODO - PROYECTO FINAL
+  digitalWrite(PIN_BUZZER, HIGH);
 
-   Buzzer activo encendido hasta presionar la tecla
-   que apaga la alarma. Después, reiniciarSistema().
-  */
+  while (leerTeclado() != TECLA_APAGAR_ALARMA) { }
+
+  digitalWrite(PIN_BUZZER, LOW);
+
+  intentosFallidos = 0;
+  apagarLEDs();
+  reiniciarSistema();
 }
 
 
 // ==============================================================
-// 20. REINICIAR CICLO DE AUTENTICACIÓN
+// 15. REINICIAR CICLO
 // ==============================================================
 
 void reiniciarSistema()
 {
- uidTam = 0;
-
+  uidTam = 0;
   usuarioActual = -1;
-
   posicionPIN = 0;
-
   pinIngresado[0] = '\0';
 
-
-  lcd.clear();
-
-  lcd.setCursor(0, 0);
-  lcd.print("CONTROL ACCESO");
-
-  lcd.setCursor(0, 1);
-  lcd.print("PRESENTE TARJETA");
-
+  mostrar(F("CONTROL ACCESO"), F("PRESENTE TARJETA"));
 
   mostrarEstadoLED(LED_ESPERANDO_RFID);
 
@@ -607,158 +565,98 @@ void reiniciarSistema()
 
 
 // ==============================================================
-// 21. SETUP
+// 16. SETUP
 // ==============================================================
 
 void setup()
 {
-
-  // ----------------------------------------------------------
-  // SERIAL
-  // ----------------------------------------------------------
-
   Serial.begin(9600);
 
-
-  // ----------------------------------------------------------
-  // LCD
-  // ----------------------------------------------------------
-
   lcd.init();
-
   lcd.backlight();
-
-
-  // ----------------------------------------------------------
-  // 74HC595
-  // ----------------------------------------------------------
 
   pinMode(DATA, OUTPUT);
   pinMode(CLOCK, OUTPUT);
   pinMode(LATCH, OUTPUT);
 
-  actualizarRegistro();
-
-
-  // ----------------------------------------------------------
-  // KEYPAD
-  // ----------------------------------------------------------
-
-  for (byte i = 0; i < 4; i++)
-  {
-    pinMode(columnas[i], INPUT_PULLUP);
-  }
-
-
-  // ----------------------------------------------------------
-  // BUZZER
-  // ----------------------------------------------------------
+#if USAR_TECLADO
+  for (byte i = 0; i < 4; i++) pinMode(columnas[i], INPUT_PULLUP);
+#endif
 
   pinMode(PIN_BUZZER, OUTPUT);
-
-
-  // ----------------------------------------------------------
-  // BOTÓN DIAGNÓSTICO
-  // ----------------------------------------------------------
+  digitalWrite(PIN_BUZZER, LOW);
 
   pinMode(PIN_DIAG, INPUT_PULLUP);
 
-
-  // ----------------------------------------------------------
-  // SERVO
-  // ----------------------------------------------------------
-
   puerta.attach(PIN_SERVO);
-
-
-  // ----------------------------------------------------------
-  // RFID
-  // ----------------------------------------------------------
+  puerta.write(ANGULO_CERRADA);
 
   SPI.begin();
-
   rfid.PCD_Init();
 
-
-  // ----------------------------------------------------------
-  // INICIO
-  // ----------------------------------------------------------
-
-  lcd.clear();
-
-  lcd.setCursor(0, 0);
-  lcd.print("SISTEMA ACCESO");
-
-  lcd.setCursor(0, 1);
-  lcd.print("INICIANDO...");
-
+  mostrar(F("SISTEMA ACCESO"), F("INICIANDO..."));
   mostrarEstadoLED(LED_INICIO);
-
   delay(1500);
 
-  cargarUsuariosIniciales();
-  for (byte i = 0; i < 8; i++) { mostrarEstadoLED(1 << i); delay(300); } //prueba leds
+#if AUTOTEST
+  // Prueba de salidas: LEDs 1..8, buzzer y servo
+  for (byte i = 0; i < 8; i++)
+  {
+    mostrarEstadoLED(1 << i);
+    delay(250);
+  }
+  apagarLEDs();
+
+  pitar(150);
+
+  puerta.write(ANGULO_ABIERTA);
+  delay(700);
+  puerta.write(ANGULO_CERRADA);
+  delay(700);
+#endif
+
+  // Registro si la EEPROM está vacía o si se mantiene el botón D3
+  if (!usuariosRegistrados() || digitalRead(PIN_DIAG) == LOW)
+  {
+    registrarUsuarios();
+  }
+
   reiniciarSistema();
 }
 
 
 // ==============================================================
-// 22. LOOP
+// 17. LOOP (MÁQUINA DE ESTADOS)
 // ==============================================================
 
 void loop()
 {
-
-  /*
-   ============================================================
-                       UNIDAD DE CONTROL
-   ============================================================
-
-   La variable "estado" representa el estado actual
-   del sistema.
-
-   Dependiendo de ese estado, la CPU ejecutará una
-   operación diferente.
-  */
-
-
   switch (estado)
   {
-
-    // ========================================================
-    // ESTADO 0 - ESPERANDO RFID
-    // ========================================================
-
-        case ESPERANDO_RFID:
+    case ESPERANDO_RFID:
 
       if (leerTarjeta())
       {
         mostrarEstadoLED(LED_VALIDANDO_RFID);
-
-        delay(300);   // para que el LED 3 alcance a verse
+        delay(300);
 
         if (tarjetaAutorizada())
         {
-          intentosFallidos = 0;      // nuevo proceso de autenticación
+          sonidoCorrecto();          // 1 pip: tarjeta válida
 
+          intentosFallidos = 0;
           mostrarPantallaPIN();
-
           mostrarEstadoLED(LED_ESPERANDO_PIN);
-
           estado = ESPERANDO_PIN;
         }
         else
         {
-          estado = ACCESO_DENEGADO;
+          estado = ACCESO_DENEGADO;  // aquí suenan los 2 pips
         }
       }
 
       break;
 
-
-    // ========================================================
-    // ESTADO 1 - ESPERANDO PIN
-    // ========================================================
 
     case ESPERANDO_PIN:
 
@@ -770,19 +668,14 @@ void loop()
       break;
 
 
-    // ========================================================
-    // ESTADO 2 - VALIDANDO PIN
-    // ========================================================
-
     case VALIDANDO_PIN:
 
       mostrarEstadoLED(LED_VALIDANDO_PIN);
-
-      delay(300);   // para que el LED 5 alcance a verse
+      delay(300);
 
       if (validarPIN())
       {
-        estado = ACCESO_AUTORIZADO;
+        estado = ACCESO_AUTORIZADO;  // aquí suena 1 pip
       }
       else
       {
@@ -790,35 +683,27 @@ void loop()
 
         if (intentosFallidos >= 3)
         {
-          // Tercer intento: ACCESO DENEGADO y luego ALARMA
           estado = ACCESO_DENEGADO;
         }
         else
         {
-          // Primer o segundo intento: permitir reintento
           lcd.clear();
-
           lcd.setCursor(0, 0);
-          lcd.print("PIN INCORRECTO");
-
+          lcd.print(F("PIN INCORRECTO"));
           lcd.setCursor(0, 1);
-          lcd.print("INTENTO ");
+          lcd.print(F("INTENTO "));
           lcd.print(intentosFallidos);
-          lcd.print("/3");
+          lcd.print(F("/3"));
 
           mostrarEstadoLED(LED_DENEGADO);
-
-          sonidoError();
-
+          sonidoError();             // 2 pips: PIN incorrecto
           delay(1500);
 
           posicionPIN = 0;
           pinIngresado[0] = '\0';
 
           mostrarPantallaPIN();
-
           mostrarEstadoLED(LED_ESPERANDO_PIN);
-
           estado = ESPERANDO_PIN;
         }
       }
@@ -826,39 +711,23 @@ void loop()
       break;
 
 
-    // ========================================================
-    // ESTADO 3 - ACCESO AUTORIZADO
-    // ========================================================
-
     case ACCESO_AUTORIZADO:
 
-      // "ACCESO AUTORIZADO" (17 caracteres) no cabe en una
-      // línea de 16, por eso se divide en dos.
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("ACCESO");
-
-      lcd.setCursor(0, 1);
-      lcd.print("AUTORIZADO");
-
+      mostrar(F("ACCESO"), F("AUTORIZADO"));
 
       mostrarEstadoLED(LED_AUTORIZADO);
 
-      sonidoCorrecto();
-
+      sonidoCorrecto();              // 1 pip: PIN correcto
       abrirPuerta();
 
+      delay(1000);
+
+      mostrar(F("PUERTA ABIERTA"), F("C = CERRAR"));
 
       estado = PUERTA_ABIERTA;
 
       break;
 
-
-    // ========================================================
-    // ESTADO 4 - ACCESO DENEGADO
-    // ========================================================
 
     case ACCESO_DENEGADO:
 
@@ -866,44 +735,19 @@ void loop()
 
       if (usuarioActual < 0)
       {
-        // Tarjeta no registrada
-
-        lcd.clear();
-
-        lcd.setCursor(0, 0);
-        lcd.print("TARJETA INVALIDA");
-
-        lcd.setCursor(0, 1);
-        lcd.print("ACCESO DENEGADO");
-
-        sonidoError();
-
+        mostrar(F("TARJETA INVALIDA"), F("ACCESO DENEGADO"));
+        sonidoError();               // 2 pips: tarjeta inválida
         delay(1500);
-
-        apagarLEDs();
 
         reiniciarSistema();
       }
       else
       {
-        // Tercer intento de PIN fallido
-
-        lcd.clear();
-
-        lcd.setCursor(0, 0);
-        lcd.print("ACCESO DENEGADO");
-
-        sonidoError();
-
+        mostrar(F("ACCESO DENEGADO"), F(""));
+        sonidoError();               // 2 pips: tercer PIN incorrecto
         delay(1500);
 
-        lcd.clear();
-
-        lcd.setCursor(0, 0);
-        lcd.print("ACCESO BLOQUEADO");
-
-        lcd.setCursor(0, 1);
-        lcd.print("ALARMA ACTIVADA");
+        mostrar(F("ACCESO BLOQUEADO"), F("ALARMA ACTIVADA"));
 
         estado = ALARMA;
       }
@@ -911,42 +755,23 @@ void loop()
       break;
 
 
-    // ========================================================
-    // ESTADO 5 - PUERTA ABIERTA
-    // ========================================================
-
     case PUERTA_ABIERTA:
 
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("PUERTA ABIERTA");
-
-
-      delay(3000);
-
-
-      cerrarPuerta();
-
-      apagarLEDs();
-
-      intentosFallidos = 0;
-
-
-      reiniciarSistema();
+      if (leerTeclado() == TECLA_CERRAR_PUERTA)
+      {
+        cerrarPuerta();
+        intentosFallidos = 0;
+        reiniciarSistema();
+      }
 
       break;
 
-
-    // ========================================================
-    // ESTADO 6 - ALARMA
-    // ========================================================
 
     case ALARMA:
 
       mostrarEstadoLED(LED_ALARMA);
 
-      activarAlarma();
+      activarAlarma();   // bloquea hasta recibir 'D'
 
       break;
   }
