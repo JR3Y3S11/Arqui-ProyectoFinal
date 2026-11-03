@@ -1,18 +1,25 @@
 /*
  ==============================================================
-        SISTEMA DE CONTROL DE ACCESO - VERSIÓN DE PRUEBA
+             ARQUITECTURA DEL COMPUTADOR
+        PROYECTO: SISTEMA DE CONTROL DE ACCESO (VARIANTE A)
  ==============================================================
- Hardware que se usa en esta versión:
-   LCD I2C, un 74HC595 (LEDs), RC522, servo, buzzer activo, botón
+ Josué Reyes
+ José De la Roca
 
- Sin teclado matricial: las teclas se escriben en el Monitor
- Serial (9600). Ejemplo: "1234#" escribe el PIN y lo confirma.
+ Distribución del teclado (serigrafía de la placa):
+   S1  S2  S3  S4   ->  1 2 3 A
+   S5  S6  S7  S8   ->  4 5 6 B
+   S9  S10 S11 S12  ->  7 8 9 C
+   S13 S14 S15 S16  ->  0 * # D
 
-   0-9 -> dígitos del PIN
-   *   -> borrar último dígito
-   #   -> confirmar PIN
-   C   -> cerrar la puerta
-   D   -> apagar la alarma
+ Teclas especiales:
+   0-9      -> dígitos del PIN
+   S14 (*)  -> borrar último dígito / cancelar
+   S15 (#)  -> confirmar PIN / confirmar borrado
+   S12 (C)  -> cerrar la puerta
+   S16 (D)  -> apagar la alarma
+   S4  (A)  -> borrar TODOS los usuarios (en la pantalla de
+               espera); pide confirmación: # = sí, * = no
 
  Sonidos:
    Tarjeta válida   -> 1 pip
@@ -20,14 +27,16 @@
    PIN correcto     -> 1 pip
    PIN incorrecto   -> 2 pips
 
- Cuando estén armados el teclado y el segundo 595:
-   USAR_TECLADO 1  y  DOS_595 1
+ Usuarios (EEPROM):
+   - Si la EEPROM está vacía, el sistema pide registrar los
+     usuarios al arrancar (tarjeta + PIN).
+   - Para borrar todos los usuarios: en la pantalla
+     "PRESENTE TARJETA" presionar A (S4) y confirmar con #.
+     Luego el sistema pide registrar usuarios nuevos.
  ==============================================================
 */
 
-#define USAR_TECLADO 0   // 0 = teclas por Monitor Serial, 1 = teclado matricial
-#define DOS_595      0   // 0 = un solo 595 (LEDs), 1 = dos 595 en cadena
-#define AUTOTEST     1   // 1 = al arrancar prueba LEDs, buzzer y servo
+#define AUTOTEST 1   // 1 = al arrancar prueba LEDs, buzzer y servo
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -38,26 +47,29 @@
 
 
 // ==============================================================
-// 1. PINES
+// 1. MAPA DE PINES
 // ==============================================================
 /*
+ D0  -> Serial RX (no se usa)
+ D1  -> Serial TX (no se usa)
  D2  -> Buzzer ACTIVO
- D3  -> Botón (a GND, INPUT_PULLUP): mantener al encender = registrar usuarios
+ D3  -> Libre
  D4  -> Servo
- D6  -> RFID RST (divisor)
- D7  -> 74HC595 DATA
- D8  -> 74HC595 CLOCK
- D9  -> 74HC595 LATCH
- D10 -> RFID SS  (divisor)
- D11 -> RFID MOSI (divisor)
- D12 -> RFID MISO (directo)
- D13 -> RFID SCK (divisor)
- A0..A3 -> Keypad C1..C4 (solo si USAR_TECLADO 1)
- A4/A5 -> LCD SDA/SCL
+ D5  -> Libre
+ D6  -> RFID RST        (con divisor)
+ D7  -> 74HC595 DATA    (al chip 1, teclado)
+ D8  -> 74HC595 CLOCK   (chip 1 y chip 2)
+ D9  -> 74HC595 LATCH   (chip 1 y chip 2)
+ D10 -> RFID SDA / SS   (con divisor)
+ D11 -> RFID MOSI       (con divisor)
+ D12 -> RFID MISO       (directo)
+ D13 -> RFID SCK        (con divisor)
+ A0..A3 -> Keypad C1..C4
+ A4  -> LCD SDA
+ A5  -> LCD SCL
 */
 
 const byte PIN_BUZZER = 2;
-const byte PIN_DIAG   = 3;
 const byte PIN_SERVO  = 4;
 
 const byte RFID_RST = 6;
@@ -84,16 +96,26 @@ MFRC522 rfid(RFID_SS, RFID_RST);
 const byte ANGULO_CERRADA = 0;
 const byte ANGULO_ABIERTA = 90;
 
-const char TECLA_CERRAR_PUERTA = 'C';
-const char TECLA_APAGAR_ALARMA = 'D';
+const char TECLA_CERRAR_PUERTA   = 'C';   // S12
+const char TECLA_APAGAR_ALARMA   = 'D';   // S16
+const char TECLA_BORRAR_USUARIOS = 'A';   // S4
 
 
 // ==============================================================
-// 3. REGISTROS 74HC595
+// 3. REGISTROS DE DESPLAZAMIENTO 74HC595 (ENCADENADOS)
 // ==============================================================
+/*
+ Arduino -> Chip 1 (teclado) -> Q7' -> Chip 2 (LEDs)
 
-byte registro1 = B00001111;   // filas del teclado (solo con DOS_595 1)
-byte registro2 = B00000000;   // LEDs de estado
+ El primer byte que se envía termina en el chip 2 (LEDs)
+ y el segundo byte en el chip 1 (teclado).
+
+ registro1 (chip 1): bits 3..0 = filas R4..R1 del teclado
+ registro2 (chip 2): bits 7..0 = LED8..LED1
+*/
+
+byte registro1 = B00001111;   // filas en HIGH
+byte registro2 = B00000000;   // LEDs apagados
 
 const byte LED_INICIO         = B00000001;   // LED 1
 const byte LED_ESPERANDO_RFID = B00000010;   // LED 2
@@ -106,17 +128,20 @@ const byte LED_ALARMA         = B10000000;   // LED 8
 
 
 // ==============================================================
-// 4. VARIABLES DEL SISTEMA
+// 4. MAPA DEL KEYPAD
 // ==============================================================
 
-#if USAR_TECLADO
 char teclas[4][4] = {
-  {'1', '2', '3', 'A'},
-  {'4', '5', '6', 'B'},
-  {'7', '8', '9', 'C'},
-  {'*', '0', '#', 'D'}
+  {'A', 'B', 'C', 'D'},   // S4,  S8,  S12, S16
+  {'3', '6', '9', '#'},   // S3,  S7,  S11, S15
+  {'2', '5', '8', '*'},   // S2,  S6,  S10, S14
+  {'1', '4', '7', '0'}    // S1,  S5,  S9,  S13
 };
-#endif
+
+
+// ==============================================================
+// 5. VARIABLES DEL SISTEMA
+// ==============================================================
 
 byte uidLeido[4];
 byte uidTam = 0;
@@ -133,7 +158,12 @@ const byte VALOR_MAGIC  = 0x45;
 const byte DIR_USUARIOS = 1;
 const byte TAM_REGISTRO = 8;
 
-int usuarioActual = -1;
+int usuarioActual = -1;   // -1 = tarjeta no reconocida
+
+
+// ==============================================================
+// 6. ESTADOS DEL SISTEMA
+// ==============================================================
 
 enum EstadoSistema
 {
@@ -152,20 +182,31 @@ void reiniciarSistema();   // prototipo (se usa antes de definirse)
 
 
 // ==============================================================
-// 5. 74HC595
+// 7. ACTUALIZAR LOS DOS 74HC595
 // ==============================================================
 
 void actualizarRegistro()
 {
   digitalWrite(LATCH, LOW);
 
-  shiftOut(DATA, CLOCK, MSBFIRST, registro2);          // LEDs
-
-#if DOS_595
-  shiftOut(DATA, CLOCK, MSBFIRST, registro1);          // teclado
-#endif
+  shiftOut(DATA, CLOCK, MSBFIRST, registro2);   // termina en chip 2 (LEDs)
+  shiftOut(DATA, CLOCK, MSBFIRST, registro1);   // termina en chip 1 (teclado)
 
   digitalWrite(LATCH, HIGH);
+}
+
+
+// ==============================================================
+// 8. LCD Y LEDs DE ESTADO
+// ==============================================================
+
+void mostrar(const __FlashStringHelper* linea1, const __FlashStringHelper* linea2)
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(linea1);
+  lcd.setCursor(0, 1);
+  lcd.print(linea2);
 }
 
 void mostrarEstadoLED(byte valor)
@@ -181,36 +222,18 @@ void apagarLEDs()
 
 
 // ==============================================================
-// 6. LCD
+// 9. KEYPAD
 // ==============================================================
 
-void mostrar(const __FlashStringHelper* linea1, const __FlashStringHelper* linea2)
-{
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(linea1);
-  lcd.setCursor(0, 1);
-  lcd.print(linea2);
-}
-
-
-// ==============================================================
-// 7. TECLADO (matricial o Monitor Serial)
-// ==============================================================
-
-#if USAR_TECLADO
 void seleccionarFila(byte fila)
 {
-  registro1 |= B00001111;
-  bitClear(registro1, fila);
+  registro1 |= B00001111;       // Q0-Q3 en HIGH
+  bitClear(registro1, fila);    // solo la fila elegida en LOW
   actualizarRegistro();
 }
-#endif
 
 char leerTeclado()
 {
-#if USAR_TECLADO
-
   for (byte fila = 0; fila < 4; fila++)
   {
     seleccionarFila(fila);
@@ -226,7 +249,10 @@ char leerTeclado()
         {
           char tecla = teclas[fila][columna];
 
-          while (digitalRead(columnas[columna]) == LOW) delay(5);
+          while (digitalRead(columnas[columna]) == LOW)
+          {
+            delay(5);   // esperar a que se suelte
+          }
 
           return tecla;
         }
@@ -235,29 +261,11 @@ char leerTeclado()
   }
 
   return 0;
-
-#else
-
-  // Sin teclado: cada carácter escrito en el Monitor Serial es una tecla
-  while (Serial.available())
-  {
-    char c = Serial.read();
-
-    if (c == '\n' || c == '\r' || c == ' ') continue;
-
-    if (c >= 'a' && c <= 'z') c = c - 32;   // minúsculas -> mayúsculas
-
-    return c;
-  }
-
-  return 0;
-
-#endif
 }
 
 
 // ==============================================================
-// 8. BUZZER ACTIVO
+// 10. BUZZER ACTIVO
 // ==============================================================
 
 void pitar(unsigned int ms)
@@ -283,9 +291,10 @@ void sonidoError()
 
 
 // ==============================================================
-// 9. RFID
+// 11. RFID
 // ==============================================================
 
+// Devuelve true si se leyó una tarjeta nueva (UID en uidLeido)
 bool leerTarjeta()
 {
   if (!rfid.PICC_IsNewCardPresent()) return false;
@@ -314,7 +323,7 @@ bool leerTarjeta()
 
 
 // ==============================================================
-// 10. EEPROM: USUARIOS
+// 12. EEPROM: USUARIOS
 // ==============================================================
 
 bool usuariosRegistrados()
@@ -366,9 +375,20 @@ bool validarPIN()
   return true;
 }
 
+// Borra todos los usuarios: invalida la marca y limpia los registros
+void borrarUsuarios()
+{
+  EEPROM.update(DIR_MAGIC, 0xFF);   // primero la marca, por si se corta la energía
+
+  for (int i = DIR_USUARIOS; i < DIR_USUARIOS + NUM_USUARIOS * TAM_REGISTRO; i++)
+  {
+    EEPROM.update(i, 0xFF);
+  }
+}
+
 
 // ==============================================================
-// 11. CAPTURA DEL PIN
+// 13. CAPTURA DEL PIN
 // ==============================================================
 
 void dibujarPIN()
@@ -389,6 +409,7 @@ void mostrarPantallaPIN()
   dibujarPIN();
 }
 
+// true cuando hay 4 dígitos y se presionó '#'
 bool leerPIN()
 {
   char tecla = leerTeclado();
@@ -405,7 +426,7 @@ bool leerPIN()
       dibujarPIN();
     }
   }
-  else if (tecla == '*')
+  else if (tecla == '*')            // borrar el último dígito
   {
     if (posicionPIN > 0)
     {
@@ -414,7 +435,7 @@ bool leerPIN()
       dibujarPIN();
     }
   }
-  else if (tecla == '#')
+  else if (tecla == '#')            // confirmar
   {
     if (posicionPIN == 4) return true;
   }
@@ -424,7 +445,7 @@ bool leerPIN()
 
 
 // ==============================================================
-// 12. REGISTRO DE USUARIOS EN EEPROM
+// 14. REGISTRO Y BORRADO DE USUARIOS
 // ==============================================================
 
 void registrarUsuarios()
@@ -457,7 +478,7 @@ void registrarUsuarios()
 
       tarjetaOk = true;
 
-      for (byte s = 0; s < u; s++)
+      for (byte s = 0; s < u; s++)          // evitar tarjetas repetidas
       {
         if (uidCoincide(s)) tarjetaOk = false;
       }
@@ -486,7 +507,7 @@ void registrarUsuarios()
 
     while (!leerPIN()) { }
 
-    // ---- 3. Guardar ----
+    // ---- 3. Guardar en EEPROM ----
     int base = DIR_USUARIOS + u * TAM_REGISTRO;
 
     for (byte i = 0; i < 4; i++) EEPROM.update(base + i, uidLeido[i]);
@@ -509,9 +530,42 @@ void registrarUsuarios()
   delay(1500);
 }
 
+// Pide confirmación, borra todos los usuarios y pasa al registro
+void confirmarBorrado()
+{
+  mostrar(F("BORRAR USUARIOS?"), F("#=SI    *=NO"));
+
+  while (true)
+  {
+    char tecla = leerTeclado();
+
+    if (tecla == '#')                  // confirmar
+    {
+      borrarUsuarios();
+
+      mostrar(F("USUARIOS"), F("BORRADOS"));
+      sonidoCorrecto();
+      delay(1500);
+
+      registrarUsuarios();             // sin usuarios no hay acceso
+      reiniciarSistema();
+      return;
+    }
+
+    if (tecla == '*')                  // cancelar
+    {
+      mostrar(F("BORRADO"), F("CANCELADO"));
+      delay(1200);
+
+      reiniciarSistema();
+      return;
+    }
+  }
+}
+
 
 // ==============================================================
-// 13. SERVO
+// 15. SERVO
 // ==============================================================
 
 void abrirPuerta()
@@ -528,9 +582,10 @@ void cerrarPuerta()
 
 
 // ==============================================================
-// 14. ALARMA
+// 16. ALARMA
 // ==============================================================
 
+// Buzzer encendido hasta presionar la tecla de apagado (D, S16)
 void activarAlarma()
 {
   digitalWrite(PIN_BUZZER, HIGH);
@@ -546,7 +601,7 @@ void activarAlarma()
 
 
 // ==============================================================
-// 15. REINICIAR CICLO
+// 17. REINICIAR CICLO DE AUTENTICACIÓN
 // ==============================================================
 
 void reiniciarSistema()
@@ -565,7 +620,7 @@ void reiniciarSistema()
 
 
 // ==============================================================
-// 16. SETUP
+// 18. SETUP
 // ==============================================================
 
 void setup()
@@ -579,20 +634,18 @@ void setup()
   pinMode(CLOCK, OUTPUT);
   pinMode(LATCH, OUTPUT);
 
-#if USAR_TECLADO
   for (byte i = 0; i < 4; i++) pinMode(columnas[i], INPUT_PULLUP);
-#endif
 
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
-
-  pinMode(PIN_DIAG, INPUT_PULLUP);
 
   puerta.attach(PIN_SERVO);
   puerta.write(ANGULO_CERRADA);
 
   SPI.begin();
   rfid.PCD_Init();
+
+  actualizarRegistro();
 
   mostrar(F("SISTEMA ACCESO"), F("INICIANDO..."));
   mostrarEstadoLED(LED_INICIO);
@@ -615,8 +668,8 @@ void setup()
   delay(700);
 #endif
 
-  // Registro si la EEPROM está vacía o si se mantiene el botón D3
-  if (!usuariosRegistrados() || digitalRead(PIN_DIAG) == LOW)
+  // Si no hay usuarios guardados, se registran
+  if (!usuariosRegistrados())
   {
     registrarUsuarios();
   }
@@ -626,13 +679,14 @@ void setup()
 
 
 // ==============================================================
-// 17. LOOP (MÁQUINA DE ESTADOS)
+// 19. LOOP (MÁQUINA DE ESTADOS)
 // ==============================================================
 
 void loop()
 {
   switch (estado)
   {
+    // ---------------- ESPERANDO RFID ----------------
     case ESPERANDO_RFID:
 
       if (leerTarjeta())
@@ -654,10 +708,15 @@ void loop()
           estado = ACCESO_DENEGADO;  // aquí suenan los 2 pips
         }
       }
+      else if (leerTeclado() == TECLA_BORRAR_USUARIOS)
+      {
+        confirmarBorrado();          // tecla A: borrar todos los usuarios
+      }
 
       break;
 
 
+    // ---------------- ESPERANDO PIN ----------------
     case ESPERANDO_PIN:
 
       if (leerPIN())
@@ -668,6 +727,7 @@ void loop()
       break;
 
 
+    // ---------------- VALIDANDO PIN ----------------
     case VALIDANDO_PIN:
 
       mostrarEstadoLED(LED_VALIDANDO_PIN);
@@ -683,7 +743,7 @@ void loop()
 
         if (intentosFallidos >= 3)
         {
-          estado = ACCESO_DENEGADO;
+          estado = ACCESO_DENEGADO;  // tercer intento -> alarma
         }
         else
         {
@@ -711,6 +771,7 @@ void loop()
       break;
 
 
+    // ---------------- ACCESO AUTORIZADO ----------------
     case ACCESO_AUTORIZADO:
 
       mostrar(F("ACCESO"), F("AUTORIZADO"));
@@ -729,12 +790,14 @@ void loop()
       break;
 
 
+    // ---------------- ACCESO DENEGADO ----------------
     case ACCESO_DENEGADO:
 
       mostrarEstadoLED(LED_DENEGADO);
 
       if (usuarioActual < 0)
       {
+        // Tarjeta no registrada
         mostrar(F("TARJETA INVALIDA"), F("ACCESO DENEGADO"));
         sonidoError();               // 2 pips: tarjeta inválida
         delay(1500);
@@ -743,8 +806,9 @@ void loop()
       }
       else
       {
+        // Tercer intento de PIN fallido
         mostrar(F("ACCESO DENEGADO"), F(""));
-        sonidoError();               // 2 pips: tercer PIN incorrecto
+        sonidoError();               // 2 pips
         delay(1500);
 
         mostrar(F("ACCESO BLOQUEADO"), F("ALARMA ACTIVADA"));
@@ -755,6 +819,7 @@ void loop()
       break;
 
 
+    // ---------------- PUERTA ABIERTA ----------------
     case PUERTA_ABIERTA:
 
       if (leerTeclado() == TECLA_CERRAR_PUERTA)
@@ -767,11 +832,12 @@ void loop()
       break;
 
 
+    // ---------------- ALARMA ----------------
     case ALARMA:
 
       mostrarEstadoLED(LED_ALARMA);
 
-      activarAlarma();   // bloquea hasta recibir 'D'
+      activarAlarma();   // bloquea hasta presionar D (S16)
 
       break;
   }
