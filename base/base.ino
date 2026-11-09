@@ -6,6 +6,8 @@
  Josué Reyes
  José De la Roca
 
+ VERSIÓN CON BUZZER PASIVO (se maneja con tone() / noTone())
+
  Distribución del teclado (serigrafía de la placa):
    S1  S2  S3  S4   ->  1 2 3 A
    S5  S6  S7  S8   ->  4 5 6 B
@@ -22,10 +24,11 @@
                espera); pide confirmación: # = sí, * = no
 
  Sonidos:
-   Tarjeta válida   -> 1 pip
-   Tarjeta inválida -> 2 pips
-   PIN correcto     -> 1 pip
-   PIN incorrecto   -> 2 pips
+   Tarjeta válida   -> 1 pip agudo
+   Tarjeta inválida -> 2 pips graves
+   PIN correcto     -> 1 pip agudo
+   PIN incorrecto   -> 2 pips graves
+   Alarma           -> sirena continua hasta presionar D
 
  Usuarios (EEPROM):
    - Si la EEPROM está vacía, el sistema pide registrar los
@@ -52,7 +55,7 @@
 /*
  D0  -> Serial RX (no se usa)
  D1  -> Serial TX (no se usa)
- D2  -> Buzzer ACTIVO
+ D2  -> Buzzer PASIVO (+)
  D3  -> Libre
  D4  -> Servo
  D5  -> Libre
@@ -93,12 +96,18 @@ Servo puerta;
 
 MFRC522 rfid(RFID_SS, RFID_RST);
 
-const byte ANGULO_CERRADA = 0;
-const byte ANGULO_ABIERTA = 90;
+const byte ANGULO_CERRADA = 50;
+const byte ANGULO_ABIERTA = 130;
 
 const char TECLA_CERRAR_PUERTA   = 'C';   // S12
 const char TECLA_APAGAR_ALARMA   = 'D';   // S16
 const char TECLA_BORRAR_USUARIOS = 'A';   // S4
+
+// Frecuencias del buzzer pasivo (Hz)
+const unsigned int FREQ_CORRECTO     = 2000;   // pip agudo
+const unsigned int FREQ_ERROR        = 500;    // pips graves
+const unsigned int FREQ_ALARMA_ALTA  = 1800;   // sirena: tono alto
+const unsigned int FREQ_ALARMA_BAJA  = 1200;   // sirena: tono bajo
 
 
 // ==============================================================
@@ -265,28 +274,29 @@ char leerTeclado()
 
 
 // ==============================================================
-// 10. BUZZER ACTIVO
+// 10. BUZZER PASIVO (tone / noTone)
 // ==============================================================
 
-void pitar(unsigned int ms)
+// Un pip de 'ms' milisegundos a la frecuencia indicada
+void pitar(unsigned int frecuencia, unsigned int ms)
 {
-  digitalWrite(PIN_BUZZER, HIGH);
+  tone(PIN_BUZZER, frecuencia);
   delay(ms);
-  digitalWrite(PIN_BUZZER, LOW);
+  noTone(PIN_BUZZER);
 }
 
-// Correcto: un solo pip
+// Correcto: un solo pip agudo
 void sonidoCorrecto()
 {
-  pitar(150);
+  pitar(FREQ_CORRECTO, 150);
 }
 
-// Error: dos pips
+// Error: dos pips graves
 void sonidoError()
 {
-  pitar(150);
+  pitar(FREQ_ERROR, 150);
   delay(150);
-  pitar(150);
+  pitar(FREQ_ERROR, 150);
 }
 
 
@@ -585,14 +595,26 @@ void cerrarPuerta()
 // 16. ALARMA
 // ==============================================================
 
-// Buzzer encendido hasta presionar la tecla de apagado (D, S16)
+// Sirena (dos tonos alternados) hasta presionar la tecla de apagado (D, S16)
 void activarAlarma()
 {
-  digitalWrite(PIN_BUZZER, HIGH);
+  unsigned long ultimoCambio = 0;
+  bool tonoAlto = false;
 
-  while (leerTeclado() != TECLA_APAGAR_ALARMA) { }
+  while (true)
+  {
+    if (millis() - ultimoCambio >= 300)
+    {
+      ultimoCambio = millis();
+      tonoAlto = !tonoAlto;
 
-  digitalWrite(PIN_BUZZER, LOW);
+      tone(PIN_BUZZER, tonoAlto ? FREQ_ALARMA_ALTA : FREQ_ALARMA_BAJA);
+    }
+
+    if (leerTeclado() == TECLA_APAGAR_ALARMA) break;
+  }
+
+  noTone(PIN_BUZZER);
 
   intentosFallidos = 0;
   apagarLEDs();
@@ -660,7 +682,7 @@ void setup()
   }
   apagarLEDs();
 
-  pitar(150);
+  pitar(FREQ_CORRECTO, 150);
 
   puerta.write(ANGULO_ABIERTA);
   delay(700);
